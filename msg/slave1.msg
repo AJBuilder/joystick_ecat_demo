@@ -1,0 +1,3 @@
+Header header
+akd_ethercat_lib/akd_fixedPDO_1725 outputs
+akd_ethercat_lib/akd_fixedPDO_1B20 inputs
