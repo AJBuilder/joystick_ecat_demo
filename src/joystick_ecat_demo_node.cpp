@@ -6,8 +6,11 @@
 //#include "akd_ethercat_lib/akd_fixedPDO_1B20.h"
 
 #include "AKDEcatController.h"
+#include "pthread.h"
 
 AKDController master1;
+int targetPos;
+pthread_mutex_t callbackLock; 
 
 
 struct __attribute__((__packed__)) slaveStruct{
@@ -39,18 +42,13 @@ struct __attribute__((__packed__)) slaveStruct{
 
 void readJoystick(const ds4_driver::Status::ConstPtr& joystick)
 {
-  ROS_INFO("I heard: [%i]", joystick->button_circle);
-  
+  pthread_mutex_lock(&callbackLock);
   if(joystick->button_circle) {
-    s1.targetPos = 180;
-    s2.targetPos = 180;
+    targetPos = 180;
   } else{
-    s1.targetPos = 0;
-    s2.targetPos = 0;
+    targetPos = 0;
   }
-
-  master1.Update(0, true, 1000);
-
+  pthread_mutex_unlock(&callbackLock);
 }
 
 
@@ -65,10 +63,15 @@ int main(int argc, char **argv)
   ros::Publisher  pub1 = n.advertise<joystick_ecat_demo::slave1>("slave1", 1000);
   ros::Publisher  pub2 = n.advertise<joystick_ecat_demo::slave1>("slave2", 1000);
 
+  ros::AsyncSpinner spinner(1);
 
   int err;
-  ros::Rate r(10);
+  ros::Rate r(100);
   std::string ifname;
+  bool updateMove;
+
+  pthread_mutex_init(&callbackLock, NULL);
+
 
   if(!n.getParam("ifname", ifname)){
     ROS_FATAL("No interface parameter specified.");
@@ -84,12 +87,19 @@ int main(int argc, char **argv)
   master1.confSlavePDOs(1, &s1, sizeof(s1), 0x1725, 0,0,0, 0x1B20, 0,0,0);
   master1.confSlavePDOs(2, &s2, sizeof(s2), 0x1725, 0,0,0, 0x1B20, 0,0,0);
 
-  master1.confUnits(1, 1, 360);
-  master1.confUnits(2, 1, 360);
+  if(master1.confUnits(1, 1, 360*7) && master1.confUnits(2, 1, 360*30)){
+    ROS_ERROR("Couldn't configure motion task settings.");
+  }
 
-  master1.confMotionTask(0, 2000, 10000, 10000);
+  if(!master1.confMotionTask(0, 2000, 10000, 10000)){
+    ROS_ERROR("Couldn't configure profile position mode settings.");
+  }
+  
 
-  master1.confProfPos(0, true, false);
+  if(!master1.confProfPos(0, true, true)){
+    ROS_ERROR("Couldn't configure profile position mode settings.");
+  }
+
 
   if(!master1.ecat_Start()){
     ROS_FATAL("Couldn't start ecat master");
@@ -122,6 +132,7 @@ int main(int argc, char **argv)
   }
   ROS_INFO("\nMode switched!\n");
 
+  ROS_INFO("\nHoming!\n");
   err = master1.Home(0, 0, 0, 6000, 1000, 500, 0, 0);
   if(err != true){
     ROS_INFO("\nFailed to home. %i\n", err);
@@ -129,10 +140,23 @@ int main(int argc, char **argv)
   }
   ROS_INFO("\nHomed\n");
 
+  spinner.start();
 
   while(ros::ok()){
     
-    master1.Update(0, false, 1000);
+
+    pthread_mutex_lock(&callbackLock);
+      if(s1.targetPos != targetPos){
+        s1.targetPos = targetPos;
+        s2.targetPos = targetPos;
+        updateMove = true;
+      } else updateMove = false;
+    pthread_mutex_unlock(&callbackLock);
+    
+    if(master1.Update(0, updateMove, 5000) != 0)
+    {
+      ROS_ERROR("Update Failed");
+    }
 
     for(int i = 0; i < 2 ; i++){
     struct slaveStruct *temp;
@@ -164,16 +188,26 @@ int main(int argc, char **argv)
     ext_temp->inputs.analogInput = temp->analogInput;
 
   }
-
+  
     pub1.publish(ext_s1);
     pub2.publish(ext_s2);
 
 
-    ros::spinOnce();
+    if(master1.readFault(0)){
+      ROS_INFO("\nWaiting for fault(s) to clear! Status1: 0x%4x Status2: 0x%4x\n", s1.coeStatus, s2.coeStatus);
+    do{
+      master1.clearFault(0,false);
+
+    }while(master1.readFault(0));
+      ROS_INFO("\nFault(s) cleared!\n");
+    }
+
     r.sleep();
   }
 
-  
+  pthread_mutex_destroy(&callbackLock);
+
+  ros::waitForShutdown();
 
   return 0;
 }
