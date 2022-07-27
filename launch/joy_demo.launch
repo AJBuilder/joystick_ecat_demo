@@ -1,0 +1,11 @@
+<launch>
+    <arg name="interface" default="enp0s31f6"/>
+    <param name="ifname" value="$(arg interface)"/>
+
+    <group>
+        <node pkg="joystick_ecat_demo" name="ecat_controller" type="joy_ecat_controller"/>
+
+        <node pkg="ds4_driver" name="joy_driver" type="ds4_driver_node.py"/>
+    </group>
+
+</launch>

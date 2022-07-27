@@ -63,17 +63,22 @@ int main(int argc, char **argv)
   ros::Subscriber sub = n.subscribe("status", 1000, readJoystick);
 
   ros::Publisher  pub1 = n.advertise<joystick_ecat_demo::slave1>("slave1", 1000);
-  ros::Publisher  pub2 = n.advertise<joystick_ecat_demo::slave1>("slave1", 1000);
+  ros::Publisher  pub2 = n.advertise<joystick_ecat_demo::slave1>("slave2", 1000);
 
 
   int err;
   ros::Rate r(10);
-  char ifname[10] = "ens33";
+  std::string ifname;
+
+  if(!n.getParam("ifname", ifname)){
+    ROS_FATAL("No interface parameter specified.");
+    return -1;
+  }
   
 
   if(!master1.ecat_Init(ifname)) {
-    ROS_FATAL("Couldn't init ecat master");
-    return -1;
+    ROS_FATAL("Couldn't init ecat master on %s", ifname.c_str());
+    return -2;
   }
 
   master1.confSlavePDOs(1, &s1, sizeof(s1), 0x1725, 0,0,0, 0x1B20, 0,0,0);
@@ -88,7 +93,7 @@ int main(int argc, char **argv)
 
   if(!master1.ecat_Start()){
     ROS_FATAL("Couldn't start ecat master");
-    return -2;
+    return -3;
   }
 
   ROS_INFO("\nReading fault(s)...\n");
@@ -104,7 +109,7 @@ int main(int argc, char **argv)
   ROS_INFO("\nEnabling...\n");
   if(!master1.Enable()){
     ROS_INFO("\nEnable failed\n");
-    return -3;
+    return -4;
   }
   ROS_INFO("\nEnabled!\n");
 
@@ -113,14 +118,14 @@ int main(int argc, char **argv)
 
   if(!master1.setOpMode(0, profPos)){
     ROS_INFO("\nMode switch failed\n");
-    return -4;
+    return -5;
   }
   ROS_INFO("\nMode switched!\n");
 
   err = master1.Home(0, 0, 0, 6000, 1000, 500, 0, 0);
   if(err != true){
     ROS_INFO("\nFailed to home. %i\n", err);
-    return -5;
+    return -6;
   }
   ROS_INFO("\nHomed\n");
 
