@@ -9,7 +9,11 @@
 #include "pthread.h"
 
 AKDController master1;
-int targetPos;
+int targetPos, prevTargetPos;
+ecat_OpModes mode, prevMode;
+
+
+
 pthread_mutex_t callbackLock; 
 
 
@@ -42,12 +46,23 @@ struct __attribute__((__packed__)) slaveStruct{
 
 void readJoystick(const ds4_driver::Status::ConstPtr& joystick)
 {
+
   pthread_mutex_lock(&callbackLock);
-  if(joystick->button_circle) {
-    targetPos = 180;
-  } else{
+  if(joystick->button_cross) {
     targetPos = 0;
+  } else if(joystick->button_circle){
+    targetPos = 90;
+  } else if(joystick->button_triangle){
+    targetPos = 180;
+  } else if(joystick->button_square){
+    targetPos = 270;
   }
+
+  if(joystick->button_l1)
+    mode = profPos;
+  else if(joystick->button_r1)
+    mode = profVel;
+
   pthread_mutex_unlock(&callbackLock);
 }
 
@@ -79,7 +94,7 @@ int main(int argc, char **argv)
   }
   
 
-  if(!master1.ecat_Init(ifname)) {
+  if(!master1.ecat_Init(ifname.c_str())) {
     ROS_FATAL("Couldn't init ecat master on %s", ifname.c_str());
     return -2;
   }
@@ -87,16 +102,23 @@ int main(int argc, char **argv)
   master1.confSlavePDOs(1, &s1, sizeof(s1), 0x1725, 0,0,0, 0x1B20, 0,0,0);
   master1.confSlavePDOs(2, &s2, sizeof(s2), 0x1725, 0,0,0, 0x1B20, 0,0,0);
 
-  if(master1.confUnits(1, 1, 360*7) && master1.confUnits(2, 1, 360*30)){
-    ROS_ERROR("Couldn't configure motion task settings.");
+  if(master1.confUnits(1, 30, 360) && master1.confUnits(2, 7, 360)){
+    ROS_ERROR("Couldn't configure units.");
   }
 
   if(!master1.confMotionTask(0, 2000, 10000, 10000)){
-    ROS_ERROR("Couldn't configure profile position mode settings.");
+    ROS_ERROR("Couldn't configure motion task settings.");
   }
   
+  if(!master1.setOpMode(0, profPos)){
+    ROS_ERROR("\nMode switch failed\n");
+    return -5;
+  }
+  ROS_INFO("\nMode switched!\n");
+  mode = profPos;
+  prevMode = profPos;
 
-  if(!master1.confProfPos(0, true, true)){
+  if(!master1.confProfPos(0, true, false)){
     ROS_ERROR("Couldn't configure profile position mode settings.");
   }
 
@@ -126,11 +148,7 @@ int main(int argc, char **argv)
   s1.maxTorque = 1000;
   s2.maxTorque = 1000;
 
-  if(!master1.setOpMode(0, profPos)){
-    ROS_INFO("\nMode switch failed\n");
-    return -5;
-  }
-  ROS_INFO("\nMode switched!\n");
+  
 
   ROS_INFO("\nHoming!\n");
   err = master1.Home(0, 0, 0, 6000, 1000, 500, 0, 0);
@@ -146,11 +164,22 @@ int main(int argc, char **argv)
     
 
     pthread_mutex_lock(&callbackLock);
-      if(s1.targetPos != targetPos){
+      updateMove = false;
+      if(prevTargetPos != targetPos){
         s1.targetPos = targetPos;
         s2.targetPos = targetPos;
         updateMove = true;
-      } else updateMove = false;
+        prevTargetPos = targetPos;
+      }
+      //ROS_INFO("prevTargetPos: %i  targetPos: %i\n", prevTargetPos, targetPos);
+      if(prevMode != mode){
+        if(!master1.setOpMode(0, profPos)){
+          ROS_ERROR("\nMode switch failed\n");
+          mode = prevMode;
+        }
+        ROS_INFO("\nMode switched!\n");
+        prevMode = mode;
+      }
     pthread_mutex_unlock(&callbackLock);
     
     if(master1.Update(0, updateMove, 5000) != 0)
