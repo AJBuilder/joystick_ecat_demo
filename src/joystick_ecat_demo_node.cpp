@@ -1,7 +1,7 @@
 #include "ros/ros.h"
 #include "std_msgs/String.h"
 #include "ds4_driver/Status.h"
-#include "joystick_ecat_demo/slave1.h"
+#include "joystick_ecat_demo/flexSlave1.h"
 //#include "akd_ethercat_lib/akd_fixedPDO_1725.h"
 //#include "akd_ethercat_lib/akd_fixedPDO_1B20.h"
 
@@ -9,38 +9,32 @@
 #include "pthread.h"
 
 AKDController master1;
-int targetPos, prevTargetPos;
-ecat_OpModes mode, prevMode;
+int targetPos1, targetPos2, targetVel1, targetVel2, prevTargetPos1, prevTargetPos2;
+AKDController::ecat_OpModes mode, prevMode;
 
 
 
 pthread_mutex_t callbackLock; 
 
 
-struct __attribute__((__packed__)) slaveStruct{
-    //0x1725
+  struct __attribute__((__packed__)) slaveStruct{
     //rxPDOs
-    uint16_t  ctrlWord; 
-    uint32_t  targetPos;
-    uint32_t  digOutputs;
-    uint16_t  tqFdFwd;         
-    uint16_t  maxTorque;
+    uint16_t  ctrlWord;     // 0x6040, 0
+    uint16_t  maxTorque;    // 0x6072, 0
+    int32_t  targetPos;    // 0x607A, 0
+    int32_t  targetVel;    // 0x60FF, 0
     
-    //0x1B20
     //txPDOs
-    int32_t   posActual;
-    int32_t   posFdback2;
-    int32_t   velActual;
-    uint32_t  digInputs;
-    int32_t   followErr;
-    uint32_t  latchPos;
-    uint16_t  coeStatus;
-    int16_t   tqActual;
-    uint16_t  latchStatus;
-    int16_t   analogInput;
+    uint16_t  coeStatus;    // 0x6041, 0
+    int32_t  actualPos;    // 0x6064, 0
+    int32_t  actualVel;    // 0x606C, 0
+
   } s1, s2;
 
-  joystick_ecat_demo::slave1 ext_s1, ext_s2;
+  AKDController::ecat_pdoEntry_t tx[3] = {{0x6041,0}, {0x6064,0}, {0x606C,0}};
+  AKDController::ecat_pdoEntry_t rx[4] = {{0x6040,0}, {0x6072,0},{0x607A,0},{0x60FF,0}};
+
+  joystick_ecat_demo::flexSlave1 ext_s1, ext_s2;
 
 
 
@@ -49,19 +43,33 @@ void readJoystick(const ds4_driver::Status::ConstPtr& joystick)
 
   pthread_mutex_lock(&callbackLock);
   if(joystick->button_cross) {
-    targetPos = 0;
+    targetPos1 = 0;
   } else if(joystick->button_circle){
-    targetPos = 90;
+    targetPos1 = 90;
   } else if(joystick->button_triangle){
-    targetPos = 180;
+    targetPos1 = 180;
   } else if(joystick->button_square){
-    targetPos = 270;
+    targetPos1 = 270;
   }
 
+  targetVel1 = joystick->axis_right_y * 600;
+
+  if(joystick->button_dpad_down) {
+    targetPos2 = 0;
+  } else if(joystick->button_dpad_right){
+    targetPos2 = 90;
+  } else if(joystick->button_dpad_up){
+    targetPos2 = 180;
+  } else if(joystick->button_dpad_left){
+    targetPos2 = 270;
+  }
+
+  targetVel2 = joystick->axis_left_y * 500;
+
   if(joystick->button_l1)
-    mode = profPos;
+    mode = AKDController::ecat_OpModes::profPos;
   else if(joystick->button_r1)
-    mode = profVel;
+    mode = AKDController::ecat_OpModes::profVel;
 
   pthread_mutex_unlock(&callbackLock);
 }
@@ -75,8 +83,8 @@ int main(int argc, char **argv)
 
   ros::Subscriber sub = n.subscribe("status", 1000, readJoystick);
 
-  ros::Publisher  pub1 = n.advertise<joystick_ecat_demo::slave1>("slave1", 1000);
-  ros::Publisher  pub2 = n.advertise<joystick_ecat_demo::slave1>("slave2", 1000);
+  ros::Publisher  pub1 = n.advertise<joystick_ecat_demo::flexSlave1>("slave1", 1000);
+  ros::Publisher  pub2 = n.advertise<joystick_ecat_demo::flexSlave1>("slave2", 1000);
 
   ros::AsyncSpinner spinner(1);
 
@@ -99,24 +107,33 @@ int main(int argc, char **argv)
     return -2;
   }
 
-  master1.confSlavePDOs(1, &s1, sizeof(s1), 0x1725, 0,0,0, 0x1B20, 0,0,0);
-  master1.confSlavePDOs(2, &s2, sizeof(s2), 0x1725, 0,0,0, 0x1B20, 0,0,0);
+  master1.confSlavePDOs(1, &s1, sizeof(s1), 0x1600, 0x1601, 0x1602, 0x1603, 0x1a00, 0x1a01, 0x1a02, 0x1a03);
+  master1.confSlavePDOs(2, &s2, sizeof(s2), 0x1600, 0x1601, 0x1602, 0x1603, 0x1a00, 0x1a01, 0x1a02, 0x1a03);
 
-  if(master1.confUnits(1, 30, 360) && master1.confUnits(2, 7, 360)){
-    ROS_ERROR("Couldn't configure units.");
+  if(!master1.confSlaveEntries(0, rx, sizeof(rx)/sizeof(AKDController::ecat_pdoEntry_t), tx, sizeof(tx)/sizeof(AKDController::ecat_pdoEntry_t))){
+      printf("Couldn't confSlaveEntries.\n");
+      return -1;
   }
 
-  if(!master1.confMotionTask(0, 2000, 10000, 10000)){
+  if(!master1.confUnits(1, 30, 360)){
+    ROS_ERROR("Couldn't configure slave1 units.");
+  }
+
+  if(!master1.confUnits(2, 7, 360)){
+    ROS_ERROR("Couldn't configure slave2 units.");
+  }
+
+  if(!master1.confMotionTask(0, 500, 6000, 6000)){
     ROS_ERROR("Couldn't configure motion task settings.");
   }
   
-  if(!master1.setOpMode(0, profPos)){
+  if(!master1.setOpMode(0, AKDController::ecat_OpModes::profPos)){
     ROS_ERROR("\nMode switch failed\n");
     return -5;
   }
   ROS_INFO("\nMode switched!\n");
-  mode = profPos;
-  prevMode = profPos;
+  mode = AKDController::ecat_OpModes::profPos;
+  prevMode = AKDController::ecat_OpModes::profPos;
 
   if(!master1.confProfPos(0, true, false)){
     ROS_ERROR("Couldn't configure profile position mode settings.");
@@ -151,7 +168,7 @@ int main(int argc, char **argv)
   
 
   ROS_INFO("\nHoming!\n");
-  err = master1.Home(0, 0, 0, 6000, 1000, 500, 0, 0);
+  err = master1.Home(0, 0, 0, 500, 1000, 500, 0, 0);
   if(err != true){
     ROS_INFO("\nFailed to home. %i\n", err);
     return -6;
@@ -165,15 +182,22 @@ int main(int argc, char **argv)
 
     pthread_mutex_lock(&callbackLock);
       updateMove = false;
-      if(prevTargetPos != targetPos){
-        s1.targetPos = targetPos;
-        s2.targetPos = targetPos;
+      if(prevTargetPos1 != targetPos1){
+        s1.targetPos = targetPos1;
         updateMove = true;
-        prevTargetPos = targetPos;
+        prevTargetPos1 = targetPos1;
       }
+      s1.targetVel = targetVel1;
+
+      if(prevTargetPos2 != targetPos2){
+        s2.targetPos = targetPos2;
+        updateMove = true;
+        prevTargetPos2 = targetPos2;
+      }
+      s2.targetVel = targetVel2;
       //ROS_INFO("prevTargetPos: %i  targetPos: %i\n", prevTargetPos, targetPos);
       if(prevMode != mode){
-        if(!master1.setOpMode(0, profPos)){
+        if(!master1.setOpMode(0, mode)){
           ROS_ERROR("\nMode switch failed\n");
           mode = prevMode;
         }
@@ -187,37 +211,22 @@ int main(int argc, char **argv)
       ROS_ERROR("Update Failed");
     }
 
-    for(int i = 0; i < 2 ; i++){
-    struct slaveStruct *temp;
-    joystick_ecat_demo::slave1 *ext_temp;
-    if(i == 0) {
-      temp = &s1;
-      ext_temp = &ext_s1;
-    }
-    else {
-      temp = &s2;
-      ext_temp = &ext_s2; 
-    }
+    ext_s1.targetPos = s1.targetPos;
+    ext_s1.targetVel = s1.targetVel;
+    ext_s1.actualPos = s1.actualPos;
+    ext_s1.actualVel = s1.actualVel;
+    ext_s1.coeStatus = s1.coeStatus;
+    ext_s1.ctrlWord  = s1.ctrlWord;
+    ext_s1.maxTorque = s1.maxTorque;
 
-    ext_temp->outputs.ctrlWord = temp->ctrlWord;
-    ext_temp->outputs.targetPos = temp->targetPos;
-    ext_temp->outputs.digOutputs = temp->digOutputs;
-    ext_temp->outputs.tqFdFwd = temp->tqFdFwd;
-    ext_temp->outputs.maxTorque = temp->maxTorque;
+    ext_s2.targetPos = s2.targetPos;
+    ext_s2.targetVel = s2.targetVel;
+    ext_s2.actualPos = s2.actualPos;
+    ext_s2.actualVel = s2.actualVel;
+    ext_s2.coeStatus = s2.coeStatus;
+    ext_s2.ctrlWord  = s2.ctrlWord;
+    ext_s2.maxTorque = s2.maxTorque;
 
-    ext_temp->inputs.posActual = temp->posActual;
-    ext_temp->inputs.posFdback2 = temp->posFdback2;
-    ext_temp->inputs.velActual = temp->velActual;
-    ext_temp->inputs.digInputs = temp->digInputs;
-    ext_temp->inputs.followErr = temp->followErr;
-    ext_temp->inputs.latchPos = temp->latchPos;
-    ext_temp->inputs.coeStatus = temp->coeStatus;
-    ext_temp->inputs.tqActual = temp->tqActual;
-    ext_temp->inputs.latchStatus = temp->latchStatus;
-    ext_temp->inputs.analogInput = temp->analogInput;
-
-  }
-  
     pub1.publish(ext_s1);
     pub2.publish(ext_s2);
 

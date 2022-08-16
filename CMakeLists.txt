@@ -47,6 +47,7 @@ add_message_files(
    DIRECTORY msg
    FILES
    slave1.msg
+   flexSlave1.msg
 )
 
 ## Generate services in the 'srv' folder
